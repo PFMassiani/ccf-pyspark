@@ -1,0 +1,255 @@
+\documentclass[a4paper,12pt]{article}
+
+\usepackage[utf8]{inputenc}
+\usepackage[T1]{fontenc}
+\usepackage[english]{babel}
+\usepackage{graphicx}
+\usepackage{hyperref}
+\usepackage{minted}
+\usepackage{listings}
+\usepackage{subcaption}
+
+\begin{document}
+\begin{titlepage}
+	\centering
+	\fbox{\begin{minipage}{\textwidth}
+	\centering
+	\vspace{0.3cm}
+    {\scshape\LARGE\bfseries Project report\par}
+	\vspace{0.2cm}
+	{\Large\bfseries Connected Component Finder in MapReduce \par}
+	\vspace{0.3cm}
+    \end{minipage}}
+	
+	\vfill
+	\includegraphics[width=0.5\textwidth]{fig/psl.jpg}\par\vspace{0cm}
+	{\scshape\Large Master IASD \par}
+	\vfill
+	{\Large Pierre-François \textsc{Massiani}\par}
+	\vfill
+	final project for the class\par
+	Systems and Paradigms for Big Data
+	\vfill
+    {\large June 7\textsuperscript{th}, 2020\par}
+\end{titlepage}
+\newpage
+
+\section{Introduction}
+\paragraph{Distributed computing} In many areas of research and industry, graphs are a very convenient way of representing data. Social networks, proteins, point clouds for 3D imagery,~... can be modeled as graphs, and one of the many ways to extract data from such graphs consists in finding its \emph{connected components}. A connected component is a subgraph of the original graph from which any two vertices are connected by a path. As graphs keep getting bigger and bigger, new challenges arise. For example, a single computer is generally not able to store a graph of reasonable size by today's standards, let alone find its connected components. Such graphs are typically stored in \emph{distributed storage systems}, that is groups of computers in which each machine stores and performs operations on the part of the graph it has. A distributed storage system generally takes the form of a \emph{cluster} running a \emph{distributed filesystem software}, such as HDFS. This architecture has shown to be a real game changer for \emph{big data}, since it can be very robust (data can be easily duplicated across several machines) and gets over the limitations of handling the data on a single computer. However, in order to take advantage of the physical architecture of the cluster, computer scientists must write specific algorithms that can naturally be parallelized. MapReduce is such a programming paradigm, and most distributed filesystems (such as Hadoop) also come with an implementation of it.
+
+\paragraph{MapReduce and Spark} The MapReduce programming paradigm was first proposed in 2004, and 5 years later, Hadoop published an implementation of it seamlessly integrated with its very efficient distributed filesystem, HDFS. In order to guarantee robustness, Hadoop's implementation of MapReduce frequently writes and reads on hard drives, which is a serious bottleneck for speed. Shortly after Hadoop's MapReduce implementation was published, a UC Berkeley PhD. student developed Spark in order to speed up computations. The paradigm Spark is based upon is slightly different from MapReduce\footnote{But all operations that can be done in MapReduce can be done in Spark, and conversely.}, but its main advantage is speed: Spark keeps the data in the RAM of each node of the cluster, with only a limited interaction with the hard drive. This enables Spark to be 10 to 100 times faster than MapReduce. This comes at the price of robustness: in case a worker fails, all the computations it has done so far are lost. In order to address this issue, Spark has come up with the idea of \emph{resilient distributed datasets}: instead of storing the results of the computations, Spark stores the computation graph. This has major advantages, such as enabling \emph{lazy evaluation} of RDDs, or optimizating the global computations before actually performing them.
+
+\paragraph{The CCF algorithm} The rise of distributed computation paradigms such as MapReduce and Spark has enabled engineers and researchers to come up with highly efficient, parallelizable algorithms. In~\cite{kardes2014ccf}, the authors describe the "Connected Component Finder"(CCF), an iterative algorithm based on MapReduce that finds the connected components in a graph. The authors achieve state-of-the-art performance when finding connected components in huge graphs, such as the Web-Google dataset, which can be found in~\cite{snapnets}.\par
+In this project, we propose a PySpark implementation of the CCF algorithm~\cite{kardes2014ccf}. We implemented the two variants described in the original article, and the code can be found in Appendix~\ref{pos:algorithms}. We start by describing and commenting our implementation in Section~\ref{pos:implementation}, and present our results in Section~\ref{pos:results}.
+Appendix~\ref{pos:mainloop} provides a working code to reproduce the results.\par
+In order to easily reproduce the results on your machine, you will also find the code on GitHub at the following address:
+\begin{center}
+	\url{https://github.com/PFMassiani/ccf-pyspark} 
+\end{center}
+\section{Implementation}
+\label{pos:implementation}
+\subsection{Data description}
+Formally, an undirected graph is a tuple $G=(V,E)$ where $V$ is the set of vertices and $E\subset V\times V$ is the set of edges. The input data that the algorithm expects is $E$, that is, an unordered list of pairs of vertices. The goal of the algorithm is, for each node of the graph, to map it to the identifier of its connected component. For simplicity, we define the identifier of a component to be the smallest identifier of the vertices it contains. With this convention, connected components can be identified to vertices, and the output of the algorithm is again a list of $(v_1,v_2)\in V\times V$, where $v_1$ is the node of the graph, and $v_2$ is the node with the smallest identifier in its connected component.
+\subsection{Algorithms}
+We do not provide here an explanation of the original algorithms or why they work: we recommend that you read the original article~\cite{kardes2014ccf} if you want more information on that topic. The goal of this part is to comment the implementation choices that we made.
+\subsubsection{CCF-Iterate}
+The authors present two versions of CCF-Iterate: with, and without secondary sorting. We have implemented both versions, and also present a variant of the without secondary sorting version.
+\paragraph{Without secondary sorting: offline minimum}
+This function can be found in Appendix~\ref{pos:offlinemin}. It is the vanilla implementation of Algorithm~1 from~\cite{kardes2014ccf}. The main bottlenecks are the call to~\verb|groupByKey| - which triggers a shuffle - and the fact that the minimum is computed by calling the \verb|min| function. The first bottleneck cannot be avoided, since a shuffle is needed to gather all the vertices of an estimated component in the same partition. However, the call to \verb|min| forces the whole component to be loaded in the RAM, and can lead to \verb|OutOfMemory| errors since the space complexity of this approach is linear in the size of the largest connected component. The other two approaches try to address this issue by computing the minimum in a more efficient way.
+\paragraph{Without secondary sorting: online minimum} The code for this version can be found in Appendix~\ref{pos:onlinemin}. The main difference with the previous approach is that, instead of simply calling the \verb|groupByKey| method and end up with all the nodes of a connected component in big array of which we need to find the minimum, we compute the minimum online by calling \verb|reduceByKey|. Starting from a list of \verb|(vertex1, vertex2)| pairs, we transform it into a list of \verb|(vertex1, ([vertex2],vertex2)|. This trick enables us to keep track of the minimum in the second value by simply comparing the two running minima of the arrays in the first value. We believe that this method has similar space performance to the secondary sorting one, but is has the advantage of being much simpler to implement since we do not need to worry about the partitioning of the data.
+\subparagraph{Python limitation} You may notice that, in the functions \verb|concat_and_min| and \verb|ccf_iterate_online_min|, we use Python list concatenation and list comprehension instead of \verb|itertools.chain| and \verb|itertools.starmap|. This has two major drawbacks, that make this method a lot less effective:
+\begin{itemize}
+    \item it forces the evaluation of the arrays;
+    \item it keeps rewriting the arrays in different places of the memory when they are concatenated.
+\end{itemize}
+Using iterators would solve these two issues, since they are lazily evaluated. But this raises another issue, which is a fundamental limitation in Python: to do this, we would need to stack a lot of iterators, and this raises a \verb|RecursionError| when the size of the connected component gets bigger. However, we would like to point out that this is not a limitation of the \emph{algorithm}, but of the language\footnote{Solving this problem should be possible in Python, but this is not the goal of this project.}. Using another language (such as Scala) or a smart way to chain and map functions over iterators should solve this issue. The consequence is that we do not expect this method to be better than the previous one. Worse: with all the concatenations happening, this method should actually be slower than the offline minimum one.
+\paragraph{With secondary sorting}
+This is the vanilla implementation of Algorithm~3 from~\cite{kardes2014ccf}. The code can be found in Appendix~\ref{pos:secondarysorting}. We first give a brief overview of the secondary sorting programming paradigm in MapReduce before explaining how we implemented it. For a more thorough introduction to this technique, please see~\cite{lin2010data}. For another example of a PySpark implementation of secondary sorting, see~\cite{secondary}.
+\subparagraph{The secondary sorting design pattern} The goal of secondary sorting is, given a list of \verb|(key,value)| pairs, group the values with the same key to get a list of \verb|(key, [list of values])| where the list of values is ordered. MapReduce - or Spark - does not provide such a built-in functionality. However, both are very efficient in sorting items by their \emph{keys} (but don't guarantee anything about the order of the values). Secondary sorting uses this efficient sorting of the keys to sort the values, by creating a \emph{composite key} that contains the value so MapReduce or Spark can natively sort them. In practice, implementing secondary sorting breaks down to four steps:
+\begin{enumerate}
+    \item create the composite key;
+    \item repartition the data so all the entries with the same \emph{original} key end up in the same partition\footnote{This is similar to what \texttt{groupByKey} followed by \texttt{flatMap} would do.};
+    \item sorting each partition with the desired order;
+    \item grouping the data in a list, in a \verb|groupByKey| fashion that preserves the order and the partitioning (to avoid a shuffle).
+\end{enumerate}
+\subparagraph{Implementation in PySpark} PySpark provides a nice function to do steps 2 and 3 simultaneously called \verb|repartitionAndSortWithinPartitions|. In our case, the order we want is simply the natural lexicographical order on the keys, so the default parameter works. For step 4, we use the \verb|mapPartitions| function and map the current estimate of the minimum with an iterator over the connected component, so the whole array is not loaded in memory at once. By being this cautious about how the values are grouped, the minimum of the current estimate of the connected component is simply the first item of the iterator.
+
+\subsection{Main loop}
+The CCF algorithm is iterative: we need to repeat operations \verb|ccf-iterate| and \verb|ccf-dedup| until no new pairs are generated. In Python, this is simply done by doing a \verb|for| loop. However, such loops do not get along well with the lazy evaluation feature of Spark. Indeed, the stopping condition depends on the result of the computation, so we need to force Spark to evaluate the RDD at the end of each iteration. It is then absolutely critical to raise \verb|persist| flags so the whole computation graph is not recomputed at each iteration. The code doing this can be found in Appendix~\ref{pos:mainloop}
+
+\section{Results}
+\label{pos:results}
+\subsection{On a toy example}
+The authors provide a simple toy example in Figure~5 of~\cite{kardes2014ccf}, which is very convenient to test our implementation. All methods correctly find the connected components. Moreover, we suspect that there is a typo in Figure~5.a of~\cite{kardes2014ccf}, since the vertex $H$ should be also mapped to vertex $G$ after the reducer, since we have $G<H$. It is the case in our implementation.
+
+\subsection{On real graphs}
+We have tested our algorithm on two real-world graphs taken from~\cite{snapnets}: the "Arxiv High Energy Physics paper citation network" and the "Web-Google" dataset. The first one represents the graph of scientific citations in the field of high energy physics on ArXiv, where two papers are connected if one cites the other, and the second one is the dataset published by Google in 2002 as part of the Google Programming Contest. The latter is also used in the original article as a benchmark, so we will be able to compare our performances with the authors'. All results are presented in Table~\ref{tab:results}.
+
+\begin{table}
+    \centering
+    \begin{tabular}{c|ccc}
+    \hline\hline
+            & Toy graph & Citations & Web-Google\\
+    \hline
+    Offline & 1.94 & 17.2 & 351\\
+    Online & 2.16 & 27.7 & 5660\\
+    Secondary & 2.07 & 26.1 & 538\\
+    Iterations & 4 & 7 & 8\\
+    \hline\hline
+    \end{tabular}
+    \caption{Results. The values in the first three lines are the execution times, in seconds. The last line is the number of iterations required for convergence (all methods require the same number of iterations for a given dataset). All computations were performed on DataBricks, Community Edition.}
+    \label{tab:results}
+\end{table}
+
+\subsection{Comments}
+As expected, the Online algorithm gets absolutely terrible as the size of the graph increases. Surprisingly, the Secondary sorting algorithm is slower than the Offline one, contrary to what is stated in the article (both algorithms should be comparable for small graphs, with Secondary outperforming Offline when the graph gets bigger). We interpret this as being caused by the hardware architecture we are using, since DataBricks only allocates one node for our computations.\par
+We also achieve comparable execution times as the ones that the authors got. At first, this is deceiving, because Spark is supposed to be much faster than MapReduce. However, one should bear in mind that our tests were realised on a \emph{single} node with two cores and 15 GB of RAM, whereas the authors could use a 80 nodes cluster, each with 8 cores. Consequently, our implementation is indeed approximately a hundred times faster than the one of the authors\footnote{Such a simple reasoning on orders of magnitude cannot give a precise value for the speed increase, since more nodes means more computer power available, but also increased communication times.}, as stated in the introduction.
+\section{Conclusion}
+In this project, we have implemented in PySpark the Connected Component Finder algorithm from its MapReduce specification in~\cite{kardes2014ccf}. The authors present two variants, with one using the secondary sorting design pattern and both of which we have implemented. We also propose a third variant to solve the same issue as the secondary sorting technique, but our variant does not scale well due to Python limitations on chaining and composing iterators. At comparable computer power available, our vanilla implementations are much faster than the ones of the authors thanks to Spark's in-memory computation paradigm. However, our secondary-sorting method seems to be systematically slower than the other one, which is not the expected result. We suspect that this discrepancy stems from the hardware we are using for our tests.
+\appendix
+\section{Algorithms}
+\label{pos:algorithms}
+\subsection{Imports}
+The following imports are required to make the algorithms work:
+\begin{minted}[frame=lines]{python}
+from pyspark.rdd import portable_hash
+from itertools import groupby, starmap, chain, filterfalse
+\end{minted}
+The following auxiliary functions should also be defined:
+\begin{minted}[frame=lines]{python}
+def partition_by_first_value(key):
+  return portable_hash(key[0])
+def get_sorted_values(lines):
+  groups_with_key_duplicates = groupby(lines, key=lambda x: x[0])
+  return groups_with_key_duplicates
+def concat_and_min(listval1, listval2):
+  return (listval1[0] + listval2[0], min(listval1[1], listval2[1]))
+\end{minted}
+\subsection{CCF-Iterate}
+We provide three implementations of CCF-Iterate.
+\subsubsection{CCF-Iterate with offline minimum computation}
+\label{pos:offlinemin}
+This code is an implementation of Algorithm~1 from~\cite{kardes2014ccf}, with the minimum being computed after the grouping by keys. In the original algorithm, the computation of the minimum requires two iterations over the values, but we rely on the fact that Spark handles Python arrays instead of iterables to compute it with the \verb|min| function.
+\begin{minted}[frame=lines]{python}
+def ccf_iterate_offline_min(graph):
+  sym = graph.flatMap(lambda edge : [edge, edge[::-1]])
+  grps = sym.groupByKey()
+  grps_mins = grps.map(
+    lambda keyval : (keyval[0], (keyval[1], min(keyval[1])))
+  )
+  fltr = grps_mins.filter(
+    lambda keyval : keyval[1][1] < keyval[0]
+  )
+  
+  new_pairs = sc.accumulator(0)
+  def pair_and_count(keyval):
+    minval = keyval[1][1]
+    out = [
+      (value, minval) for value in keyval[1][0] if value != minval
+    ]
+    new_pairs.add(len(out))
+    return [(keyval[0], minval)] + out
+  
+  return fltr.flatMap(pair_and_count), new_pairs
+\end{minted}
+
+\subsubsection{CCF-Iterate with online minimum computation}
+\label{pos:onlinemin}
+This code is very similar to the one in Section~\ref{pos:offlinemin}, except that the minimum is computed online as the group is being created in the \verb|reduceByKey|. See Section~\ref{pos:implementation} for the practical difference with the previous algorithm. Also note that the function passed to the \verb|reduceByKey| is \emph{not} rigorously associative (as it should be), since arrays are ordered. In practice, this order does not matter, so this is not a problem.
+\begin{minted}[frame=lines]{python}
+def ccf_iterate_online_min(graph):
+  sym = graph.flatMap(lambda edge : [edge, edge[::-1]])
+  frmt_for_reduce = sym.map(
+    lambda keyval : (keyval[0], ([keyval[1]], keyval[1]))
+  )
+  grps_mins = frmt_for_reduce.reduceByKey(concat_and_min)
+  fltr = grps_mins.filter(
+    lambda keyval : keyval[1][1] < keyval[0]
+  )
+  
+  new_pairs = sc.accumulator(0)
+  def pair_and_count(keyval):
+    minval = keyval[1][1]
+    key_min_pair = (keyval[0], minval)
+    other_pairs = [(val, minval) for val in keyval[1][0] if minval != val]
+    new_pairs.add(len(other_pairs))
+    return chain(key_min_pair, other_pairs)
+  
+  return fltr.flatMap(pair_and_count), new_pairs
+\end{minted}
+
+\subsubsection{CCF-Iterate with secondary sorting}
+\label{pos:secondarysorting}
+In this code, we make sure that the group of edges is ordered after the shuffle. To do so, we use a technique called \emph{secondary sorting}, as explained in Section~\ref{pos:implementation}. The extra indexing for \verb|keymingroup| is simply caused by the fact that \verb|groupby| returns something of the form \verb|(key,[list of (key,value)])| instead of \verb|(key,[list of values])|.
+\begin{minted}[frame=lines]{python}
+def ccf_iterate_secondary_sorting(graph):
+  sym = graph.flatMap(lambda edge: [edge, edge[::-1]])
+  composite_key = sym.map(lambda edge: (edge,None))
+  partition_sorted_composite = composite_key.\
+    repartitionAndSortWithinPartitions(
+      partitionFunc=partition_by_first_value
+    )
+  partition_sorted = partition_sorted_composite.map(
+    lambda compkey:tuple(compkey[0])
+  )
+  sorted_groups = partition_sorted.mapPartitions(
+    get_sorted_values, preservesPartitioning=True
+  )
+  groups_with_min = sorted_groups.mapValues(
+    lambda group: (next(group), group)
+  )
+  fltr = groups_with_min.filter(
+    lambda keymingroup: keymingroup[1][0][1] < keymingroup[0]
+  )
+  
+  new_pairs = sc.accumulator(0)
+  def pair_and_count(keymingroup):
+    minval = keymingroup[1][0][1]
+    key_min_pair = zip([keymingroup[0]],[minval])
+    
+    def pair_and_increment(duplicated_key, value):
+      new_pairs.add(1)
+      return (value, minval)
+    other_pairs = starmap(
+      pair_and_increment,
+      keymingroup[1][1]
+    )
+    return chain(key_min_pair, other_pairs)
+  return fltr.flatMap(pair_and_count), new_pairs
+\end{minted}
+
+\subsection{CCF-Dedup}
+The code of CCF-Dedup is much simpler:
+\begin{minted}[frame=lines]{python}
+def ccf_dedup(graph):
+  temp = graph.map(lambda keyval : (keyval, None))
+  reduced = temp.reduceByKey(lambda v1,v2 : v1)
+  return reduced.map(lambda keyval:keyval[0])
+\end{minted}
+\section{Main code}
+\label{pos:mainloop}
+The main loop of the program is the following:
+\begin{minted}[frame=lines]{python}
+def find_connected_components(graph, method):
+  if method=='online':
+    ccf_iterate = ccf_iterate_online_min
+  elif method=='offline':
+    ccf_iterate = ccf_iterate_offline_min
+  elif method=='secondary':
+    ccf_iterate = ccf_iterate_secondary_sorting
+  new_pairs = -1
+  n_loops = 0
+  while new_pairs != 0:
+    graph, acc = ccf_iterate(graph)
+    graph = ccf_dedup(graph)
+    graph.persist()
+    graph.foreach(lambda x:x)
+    new_pairs = acc.value
+    n_loops += 1
+  return graph, n_loops
+\end{minted}
+
+\bibliography{bibliography}
+\bibliographystyle{plain}
+
+\end{document}
